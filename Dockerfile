@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# تثبيت FFmpeg وgit (إن لزم) وتنظيف ملفات الكاش لتقليل الحجم
 RUN apt-get update && \
     apt-get install -y ffmpeg && \
     apt-get clean && \
@@ -8,12 +7,9 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# نسخ الملفات
-COPY requirements.txt .
 COPY bot.py .
 
-# تثبيت المكتبات
-RUN pip install --no-cache-dir -r requirements.txt
+# تثبيت المكتبة مباشرة بدون الحاجة لملف requirements.txt
+RUN pip install --no-cache-dir python-telegram-bot==20.*
 
-# تشغيل البوت
 CMD ["python", "bot.py"]
