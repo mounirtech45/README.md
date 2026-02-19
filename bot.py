@@ -4,20 +4,27 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 
-# إعداد السجلات
-logging.basicConfig(level=logging.INFO)
+# إعداد السجلات (Logs)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
 RTMP = os.getenv("RTMP_URL")
 
-# متغير عالمي لتخزين العملية
 ffmpeg_process = None
 
 def kill_process():
     global ffmpeg_process
     if ffmpeg_process:
-        ffmpeg_process.kill()
+        try:
+            ffmpeg_process.kill()
+            ffmpeg_process.wait(timeout=5)
+        except Exception:
+            pass
         ffmpeg_process = None
+        logging.info("Stream process terminated.")
 
 def get_control_keyboard():
     keyboard = [
@@ -33,8 +40,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "✨ **مرحباً بك في بوت البث الاحترافي**\n\n"
         "🚀 **الأوامر المتاحة:**\n"
-        "1️⃣ `/play [link]` : لبث فيديو مباشر (m3u8/mp4).\n"
-        "2️⃣ `/radio [audio_link] [image_link]` : لبث صوت مع صورة (الصورة اختيارية).\n\n"
+        "1️⃣ `/play [URL]` : لبث فيديو مباشر (m3u8/mp4).\n"
+        "2️⃣ `/radio [Audio_URL] [Image_URL]` : لبث صوت مع صورة (الصورة اختيارية).\n\n"
         "استخدم الأزرار أدناه للتحكم:"
     )
     if update.message:
@@ -51,11 +58,19 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kill_process()
     url = context.args[0]
     
-    # أمر الفيديو (Copy mode) لتوفير الموارد
-    cmd = ["ffmpeg", "-re", "-i", url, "-c", "copy", "-f", "flv", RTMP]
+    # وضع النسخ المباشر للفيديو لتوفير موارد المعالج
+    cmd = [
+        "ffmpeg", "-re", 
+        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+        "-i", url, 
+        "-c", "copy", "-f", "flv", RTMP
+    ]
     
-    ffmpeg_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    await update.message.reply_text("✅ تم بدء بث الفيديو..", reply_markup=get_control_keyboard())
+    try:
+        ffmpeg_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        await update.message.reply_text("✅ بدأ بث الفيديو بنجاح.", reply_markup=get_control_keyboard())
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {e}")
 
 async def play_radio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ffmpeg_process
@@ -67,13 +82,20 @@ async def play_radio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     audio_url = context.args[0]
     image_url = context.args[1] if len(context.args) > 1 else None
 
-    # بناء الأمر ديناميكياً (إذا لم توجد صورة يستخدم خلفية سوداء)
+    # إعدادات متقدمة لضمان سحب ملفات MP3 بنجاح وتجاوز حماية السيرفرات
+    input_options = [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+        "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    ]
+
     if image_url:
-        input_args = ["-loop", "1", "-i", image_url, "-i", audio_url]
+        input_args = [*input_options, "-loop", "1", "-i", image_url, *input_options, "-i", audio_url]
         v_filter = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
     else:
         # خلفية سوداء في حال عدم وجود صورة
-        input_args = ["-f", "lavfi", "-i", "color=c=black:s=1280x720:r=2", "-i", audio_url]
+        input_args = ["-f", "lavfi", "-i", "color=c=black:s=1280x720:r=2", *input_options, "-i", audio_url]
         v_filter = "format=yuv420p"
 
     cmd = [
@@ -81,13 +103,13 @@ async def play_radio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         *input_args,
         "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
         "-vf", v_filter,
-        "-c:a", "aac", "-ar", "44100", "-b:a", "128k",
+        "-c:a", "aac", "-ar", "44100", "-b:a", "128k", "-ac", "2",
         "-r", "2", "-g", "4", "-f", "flv", RTMP
     ]
 
     try:
         ffmpeg_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        await update.message.reply_text("📻 بدأ بث الراديو الآن..", reply_markup=get_control_keyboard())
+        await update.message.reply_text("📻 بدأ معالجة الصوت وبثه (راديو).", reply_markup=get_control_keyboard())
     except Exception as e:
         await update.message.reply_text(f"❌ فشل البث: {e}")
 
@@ -97,18 +119,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "stop":
         kill_process()
-        await query.edit_message_text("🛑 تم إيقاف البث بنجاح.", reply_markup=get_control_keyboard())
+        await query.edit_message_text("🛑 تم إيقاف البث تماماً.", reply_markup=get_control_keyboard())
     
     elif query.data == "status":
-        status = "🟢 يعمل" if ffmpeg_process and ffmpeg_process.poll() is None else "🔴 متوقف"
-        await query.edit_message_text(f"📊 حالة البث الحالية: {status}", reply_markup=get_control_keyboard())
+        status_text = "🟢 البث يعمل حالياً" if ffmpeg_process and ffmpeg_process.poll() is None else "🔴 البث متوقف"
+        await query.edit_message_text(f"📊 الحالة: {status_text}", reply_markup=get_control_keyboard())
     
     elif query.data == "start_menu":
         await start(update, context)
 
 if __name__ == "__main__":
     if not TOKEN or not RTMP:
-        print("Set BOT_TOKEN and RTMP_URL first!")
+        print("CRITICAL ERROR: BOT_TOKEN or RTMP_URL missing in environment variables!")
     else:
         app = ApplicationBuilder().token(TOKEN).build()
         
@@ -117,5 +139,5 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("radio", play_radio))
         app.add_handler(CallbackQueryHandler(button_handler))
         
-        print("Professional Bot Running...")
+        print("Bot is running perfectly...")
         app.run_polling()
