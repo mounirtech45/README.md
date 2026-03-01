@@ -10,7 +10,7 @@ RUN apt-get update && \
 # تحديد مجلد العمل
 WORKDIR /app
 
-# نسخ ملف المكتبات أولاً
+# نسخ ملف المكتبات أولاً لاستغلال خاصية الكاش في دوكر
 COPY requirements.txt .
 
 # تثبيت مكتبات بايثون
@@ -19,5 +19,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # نسخ ملف البوت
 COPY bot.py .
 
+# متغيرات البيئة (يجب تمريرها عند التشغيل)
+ENV BOT_TOKEN=""
+ENV RTMP_URL=""
+
+# فحص صحة الحاوية
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import telegram; print('OK')" || exit 1
+
 # تشغيل البوت
-CMD ["python", "bot.py"]
+CMD ["python", "-u", "bot.py"]
