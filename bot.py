@@ -1,10 +1,12 @@
 import subprocess
 import os
 import logging
+import asyncio
+import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 
-# إعداد السجلات (Logs)
+# إعداد السجلات
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -38,10 +40,10 @@ def get_control_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "✨ **مرحباً بك في بوت البث الاحترافي**\n\n"
+        "✨ **مرحباً بك في بوت البث الاحترافي المحدث**\n\n"
         "🚀 **الأوامر المتاحة:**\n"
-        "1️⃣ `/play [URL]` : لبث فيديو مباشر (m3u8/mp4).\n"
-        "2️⃣ `/radio [Audio_URL] [Image_URL]` : لبث صوت مع صورة (الصورة اختيارية).\n\n"
+        "1️⃣ `/play [URL]` : لبث فيديو (يدعم يوتيوب/روابط مباشرة).\n"
+        "2️⃣ `/radio [Audio_URL] [Image_URL]` : لبث صوت مع صورة.\n\n"
         "استخدم الأزرار أدناه للتحكم:"
     )
     if update.message:
@@ -57,20 +59,26 @@ async def play_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     kill_process()
     url = context.args[0]
-    
-    # وضع النسخ المباشر للفيديو لتوفير موارد المعالج
-    cmd = [
-        "ffmpeg", "-re", 
-        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-        "-i", url, 
-        "-c", "copy", "-f", "flv", RTMP
-    ]
+    msg = await update.message.reply_text("⏳ جاري استخراج رابط البث...")
+
+    ydl_opts = {'format': 'best', 'quiet': True, 'noplaylist': True}
     
     try:
+        loop = asyncio.get_event_loop()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+            stream_url = info['url']
+        
+        cmd = [
+            "ffmpeg", "-re", 
+            "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+            "-i", stream_url, 
+            "-c", "copy", "-f", "flv", RTMP
+        ]
         ffmpeg_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        await update.message.reply_text("✅ بدأ بث الفيديو بنجاح.", reply_markup=get_control_keyboard())
+        await msg.edit_text("✅ بدأ بث الفيديو بنجاح.", reply_markup=get_control_keyboard())
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ: {e}")
+        await msg.edit_text(f"❌ خطأ: {e}")
 
 async def play_radio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ffmpeg_process
@@ -82,34 +90,32 @@ async def play_radio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     audio_url = context.args[0]
     image_url = context.args[1] if len(context.args) > 1 else None
 
-    # إعدادات متقدمة لضمان سحب ملفات MP3 بنجاح وتجاوز حماية السيرفرات
+    # إضافة \r\n ضروري لعمل headers في FFmpeg بشكل صحيح
     input_options = [
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "5",
-        "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+        "-headers", "User-Agent: Mozilla/5.0\r\n"
     ]
 
     if image_url:
         input_args = [*input_options, "-loop", "1", "-i", image_url, *input_options, "-i", audio_url]
         v_filter = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
     else:
-        # خلفية سوداء في حال عدم وجود صورة
         input_args = ["-f", "lavfi", "-i", "color=c=black:s=1280x720:r=2", *input_options, "-i", audio_url]
         v_filter = "format=yuv420p"
 
     cmd = [
         "ffmpeg", "-re",
         *input_args,
+        "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
         "-vf", v_filter,
         "-c:a", "aac", "-ar", "44100", "-b:a", "128k", "-ac", "2",
-        "-r", "2", "-g", "4", "-f", "flv", RTMP
+        "-shortest", "-f", "flv", RTMP
     ]
 
     try:
-        ffmpeg_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        await update.message.reply_text("📻 بدأ معالجة الصوت وبثه (راديو).", reply_markup=get_control_keyboard())
+        ffmpeg_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL)
+        await update.message.reply_text("📻 بدأ بث الراديو (صوت + صورة).", reply_markup=get_control_keyboard())
     except Exception as e:
         await update.message.reply_text(f"❌ فشل البث: {e}")
 
@@ -119,25 +125,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "stop":
         kill_process()
-        await query.edit_message_text("🛑 تم إيقاف البث تماماً.", reply_markup=get_control_keyboard())
-    
+        await query.edit_message_text("🛑 تم إيقاف البث.", reply_markup=get_control_keyboard())
     elif query.data == "status":
-        status_text = "🟢 البث يعمل حالياً" if ffmpeg_process and ffmpeg_process.poll() is None else "🔴 البث متوقف"
+        status_text = "🟢 يعمل" if ffmpeg_process and ffmpeg_process.poll() is None else "🔴 متوقف"
         await query.edit_message_text(f"📊 الحالة: {status_text}", reply_markup=get_control_keyboard())
-    
     elif query.data == "start_menu":
         await start(update, context)
 
 if __name__ == "__main__":
     if not TOKEN or not RTMP:
-        print("CRITICAL ERROR: BOT_TOKEN or RTMP_URL missing in environment variables!")
+        print("CRITICAL ERROR: BOT_TOKEN or RTMP_URL missing!")
     else:
         app = ApplicationBuilder().token(TOKEN).build()
-        
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("play", play_video))
         app.add_handler(CommandHandler("radio", play_radio))
         app.add_handler(CallbackQueryHandler(button_handler))
-        
-        print("Bot is running perfectly...")
+        print("Bot is running...")
         app.run_polling()
