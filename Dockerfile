@@ -1,21 +1,24 @@
 FROM python:3.11-slim
 
-RUN apt-get update && \
-    apt-get install -y ffmpeg curl && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
+# مجلد العمل
 WORKDIR /app
 
+# تثبيت المكتبات
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# نسخ الكود
 COPY bot.py .
 
-ENV BOT_TOKEN=""
-ENV RTMP_URL=""
+# إنشاء مجلدات البيانات
+RUN mkdir -p data/mem data/cfg data/tmp
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import telegram; print('OK')" || exit 1
+# المنفذ
+EXPOSE 5000
 
-CMD ["python", "-u", "bot.py"]
+# تشغيل gunicorn
+CMD ["gunicorn", "bot:app", \
+     "--workers", "2", \
+     "--timeout", "120", \
+     "--bind", "0.0.0.0:5000", \
+     "--log-level", "info"]
